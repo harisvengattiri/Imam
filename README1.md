@@ -1,2 +1,0 @@
-# CounterApp
-Just for counting

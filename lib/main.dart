@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'dart:math';
+import 'package:geolocator/geolocator.dart';
+import 'package:flutter_compass/flutter_compass.dart';
 
 void main() {
   runApp(const MyApp());
@@ -12,26 +15,11 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Flutter Demo',
+      title: 'Quibla App',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: const MyHomePage(title: 'Thasbeeh Counter App'),
+      home: const MyHomePage(title: 'Quibla Finder & Thasbeeh Counter App'),
     );
   }
 }
@@ -55,7 +43,83 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
+
+  double? phoneHeading;
+  double? targetBearing;
+
+  double currentLat = 0;
+  double currentLng = 0;
+
+  double targetLat = 21.4225;
+  double targetLng = 39.8262;
+
   int _counter = 0;
+
+  Future<void> getLocation() async {
+    bool serviceEnabled;
+    LocationPermission permission;
+
+    serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      return;
+    }
+
+    permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        return;
+      }
+    }
+
+    Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high);
+
+    setState(() {
+      currentLat = position.latitude;
+      currentLng = position.longitude;
+
+      targetBearing = calculateBearing(
+        currentLat,
+        currentLng,
+        targetLat,
+        targetLng,
+      );
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+
+    getLocation();
+
+    FlutterCompass.events?.listen((event) {
+      setState(() {
+        phoneHeading = event.heading;
+      });
+    });
+  }
+
+  double calculateBearing(
+    double lat1, double lon1, double lat2, double lon2) {
+
+    var dLon = (lon2 - lon1) * pi / 180;
+
+    lat1 = lat1 * pi / 180;
+    lat2 = lat2 * pi / 180;
+
+    var y = sin(dLon) * cos(lat2);
+    var x = cos(lat1) * sin(lat2) -
+        sin(lat1) * cos(lat2) * cos(dLon);
+
+    var brng = atan2(y, x);
+
+    brng = brng * 180 / pi;
+    brng = (brng + 360) % 360;
+
+    return brng;
+  }
 
   void _resetCounter() {
     setState(() {
@@ -93,24 +157,33 @@ class _MyHomePageState extends State<MyHomePage> {
         title: Text(widget.title),
       ),
       body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            const Text(
+              'Direction of Namaz is showing below',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Compass Needle
+            targetBearing == null
+                ? const CircularProgressIndicator()
+                : Transform.rotate(
+                    angle:
+                        ((targetBearing! - (phoneHeading ?? 0)) * pi / 180),
+                    child: const Icon(
+                      Icons.navigation,
+                      size: 120,
+                      color: Colors.red,
+                    ),
+                  ),
+
+            const SizedBox(height: 40),
+
             const Text('You have done your thasbeeh this many times:'),
             Text(
               '$_counter',
@@ -128,14 +201,14 @@ class _MyHomePageState extends State<MyHomePage> {
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
-          children: const [
-            Icon(Icons.add),
-            SizedBox(width: 8),
-            Text('count thasbeeh'),
-          ],
-        ),
-      ),
-    ),
+                children: const [
+                  Icon(Icons.add),
+                  SizedBox(width: 8),
+                  Text('count thasbeeh'),
+                  ],
+                ),
+              ),
+            ),
     SizedBox(height: 16),
     Center(
       child: ElevatedButton(

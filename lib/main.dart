@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'dart:math';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter_compass/flutter_compass.dart';
+import 'package:adhan/adhan.dart';
+import 'package:intl/intl.dart';
 
 void main() {
   runApp(const MyApp());
@@ -15,11 +17,11 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Quibla App',
+      title: 'Muslim App',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: const MyHomePage(title: 'Quibla Finder & Thasbeeh Counter App'),
+      home: const MyHomePage(title: 'Muslim App'),
     );
   }
 }
@@ -42,10 +44,23 @@ class MyHomePage extends StatefulWidget {
   State<MyHomePage> createState() => _MyHomePageState();
 }
 
+class NextPrayerData {
+  final String name;
+  final DateTime time;
+  final String remainingText;
+
+  const NextPrayerData({
+    required this.name,
+    required this.time,
+    required this.remainingText,
+  });
+}
+
 class _MyHomePageState extends State<MyHomePage> {
 
   double? phoneHeading;
   double? targetBearing;
+  late Future<NextPrayerData> _nextPrayerFuture;
 
   double currentLat = 0;
   double currentLng = 0;
@@ -55,44 +70,109 @@ class _MyHomePageState extends State<MyHomePage> {
 
   int _counter = 0;
 
-  Future<void> getLocation() async {
-    bool serviceEnabled;
-    LocationPermission permission;
+  Future<Position> getLocation() async {
 
-    serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
-      return;
+      throw Exception('Location services are disabled');
     }
 
-    permission = await Geolocator.checkPermission();
+    var permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) {
-        return;
-      }
     }
 
-    Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high);
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      throw Exception('Location permission denied');
+    }
 
-    setState(() {
-      currentLat = position.latitude;
-      currentLng = position.longitude;
+    final position = await Geolocator.getCurrentPosition(
+      desiredAccuracy: LocationAccuracy.high,
+    );
 
-      targetBearing = calculateBearing(
-        currentLat,
-        currentLng,
-        targetLat,
-        targetLng,
-      );
-    });
+    if (mounted) {
+      setState(() {
+        currentLat = position.latitude;
+        currentLng = position.longitude;
+
+        targetBearing = calculateBearing(
+          currentLat,
+          currentLng,
+          targetLat,
+          targetLng,
+        );
+      });
+    }
+
+    return position;
   }
+
+    PrayerTimes getPrayerTimes(double lat, double lon) {
+      final coordinates = Coordinates(lat, lon);
+
+      final params = CalculationMethod.muslim_world_league.getParameters();
+      params.madhab = Madhab.shafi; // Kerala follows Shafi
+
+      final date = DateComponents.from(DateTime.now());
+
+      return PrayerTimes(coordinates, date, params);
+    }
+    NextPrayerData getNextPrayer(PrayerTimes prayerTimes) {
+      final next = prayerTimes.nextPrayer();
+      final time = prayerTimes.timeForPrayer(next);
+
+      if (time == null) {
+        throw Exception('Next prayer time unavailable');
+      }
+
+      final remaining = time.difference(DateTime.now());
+      return NextPrayerData(
+        name: next.name,
+        time: time,
+        remainingText: formatRemainingDuration(remaining),
+      );
+    }
+    String formatTime(DateTime time) {
+      return DateFormat('h.mm').format(time);
+    }
+
+    String formatRemainingDuration(Duration duration) {
+      if (duration.isNegative) {
+        return '0 minutes more';
+      }
+
+      final totalMinutes = duration.inMinutes;
+      final hours = totalMinutes ~/ 60;
+      final minutes = totalMinutes % 60;
+
+      if (hours == 0) {
+        return '$minutes minute${minutes == 1 ? '' : 's'} more';
+      }
+
+      if (minutes == 0) {
+        return '$hours hour${hours == 1 ? '' : 's'} more';
+      }
+
+      return '$hours hour${hours == 1 ? '' : 's'} and $minutes minute${minutes == 1 ? '' : 's'} more';
+    }
+    Future<NextPrayerData> getNextPrayerTime() async {
+      final position = await getLocation();
+
+      final prayerTimes = getPrayerTimes(
+        position.latitude,
+        position.longitude,
+      );
+
+      return getNextPrayer(prayerTimes);
+    }
+
 
   @override
   void initState() {
     super.initState();
 
-    getLocation();
+    _nextPrayerFuture = getNextPrayerTime();
 
     FlutterCompass.events?.listen((event) {
       setState(() {
@@ -160,6 +240,52 @@ class _MyHomePageState extends State<MyHomePage> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            FutureBuilder<NextPrayerData>(
+              future: _nextPrayerFuture,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const CircularProgressIndicator();
+                } else if (snapshot.hasError) {
+                  return const Text('Unable to load next prayer');
+                } else {
+                  final nextPrayer = snapshot.data!;
+                  return Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.deepPurple.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      children: [
+                        const Text(
+                          "Next prayer is",
+                          style: TextStyle(fontSize: 14, color: Colors.black54),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          "${nextPrayer.name} at ${formatTime(nextPrayer.time)}",
+                          style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.deepPurple,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          nextPrayer.remainingText,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.green,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+              },
+            ),
+            const SizedBox(height: 20),
             const Text(
               'Direction of Namaz is showing below',
               textAlign: TextAlign.center,
@@ -189,7 +315,7 @@ class _MyHomePageState extends State<MyHomePage> {
               '$_counter',
               style: Theme.of(context).textTheme.headlineMedium,
             ),
-            SizedBox(height: 32),
+            const SizedBox(height: 32),
             Center(
               child: ElevatedButton(
                 onPressed: _incrementCounter,
@@ -209,28 +335,28 @@ class _MyHomePageState extends State<MyHomePage> {
                 ),
               ),
             ),
-    SizedBox(height: 16),
-    Center(
-      child: ElevatedButton(
-        onPressed: _resetCounter,
-        style: ElevatedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(30),
-          ),
-          backgroundColor: Colors.red,
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: const [
-            Icon(Icons.refresh, color: Colors.white),
-            SizedBox(width: 8),
-            Text('Thasbeeh Target Finished', style: TextStyle(color: Colors.white)), 
+            const SizedBox(height: 16),
+            Center(
+              child: ElevatedButton(
+                onPressed: _resetCounter,
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(30),
+                  ),
+                  backgroundColor: Colors.red,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: const [
+                    Icon(Icons.refresh, color: Colors.white),
+                    SizedBox(width: 8),
+                    Text('Thasbeeh Target Finished', style: TextStyle(color: Colors.white)), 
+                  ],
+                ),
+              ),
+            ),
           ],
-        ),
-      ),
-    ),
-  ],
         ),
       ),
     );

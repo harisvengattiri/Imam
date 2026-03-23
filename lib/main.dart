@@ -67,12 +67,26 @@ class _MyHomePageState extends State<MyHomePage> {
   double? targetBearing;
   late Future<NextPrayerData> _nextPrayerFuture;
   bool _usingPreviousLocation = false;
+  bool _isLocationAvailable = false;
+  StreamSubscription<ServiceStatus>? _locationServiceSubscription;
 
   double currentLat = 0;
   double currentLng = 0;
 
   double targetLat = 21.4225;
   double targetLng = 39.8262;
+
+  Future<void> _updateLocationAvailability() async {
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    final permission = await Geolocator.checkPermission();
+    final permissionGranted = permission == LocationPermission.whileInUse ||
+        permission == LocationPermission.always;
+
+    if (!mounted) return;
+    setState(() {
+      _isLocationAvailable = serviceEnabled && permissionGranted;
+    });
+  }
 
   void _applyCoordinates(double lat, double lng) {
     if (!mounted) return;
@@ -118,6 +132,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
     final serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
+      await _updateLocationAvailability();
       if (preferFreshLocation) {
         throw Exception('Location services are disabled');
       }
@@ -133,6 +148,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
     if (permission == LocationPermission.denied ||
         permission == LocationPermission.deniedForever) {
+      await _updateLocationAvailability();
       if (preferFreshLocation) {
         throw Exception('Location permission denied');
       }
@@ -159,6 +175,7 @@ class _MyHomePageState extends State<MyHomePage> {
       );
       _applyCoordinates(position.latitude, position.longitude);
       await _saveLastLocation(position.latitude, position.longitude);
+      await _updateLocationAvailability();
       return (
         lat: position.latitude,
         lng: position.longitude,
@@ -173,6 +190,7 @@ class _MyHomePageState extends State<MyHomePage> {
       );
       _applyCoordinates(position.latitude, position.longitude);
       await _saveLastLocation(position.latitude, position.longitude);
+      await _updateLocationAvailability();
       return (
         lat: position.latitude,
         lng: position.longitude,
@@ -300,12 +318,23 @@ class _MyHomePageState extends State<MyHomePage> {
     super.initState();
 
     _nextPrayerFuture = getNextPrayerTime();
+    _updateLocationAvailability();
+    _locationServiceSubscription =
+        Geolocator.getServiceStatusStream().listen((_) {
+      _updateLocationAvailability();
+    });
 
     FlutterCompass.events?.listen((event) {
       setState(() {
         phoneHeading = event.heading;
       });
     });
+  }
+
+  @override
+  void dispose() {
+    _locationServiceSubscription?.cancel();
+    super.dispose();
   }
 
   double calculateBearing(
@@ -349,7 +378,10 @@ class _MyHomePageState extends State<MyHomePage> {
           IconButton(
             onPressed: _refreshNextPrayer,
             tooltip: 'Refresh location',
-            icon: const Icon(Icons.my_location),
+            icon: Icon(
+              Icons.my_location,
+              color: _isLocationAvailable ? Colors.green : Colors.red,
+            ),
           ),
         ],
       ),

@@ -407,100 +407,155 @@ class _MyHomePageState extends State<MyHomePage> {
           ),
         ],
       ),
-      body: Center(
+      body: SafeArea(
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            FutureBuilder<NextPrayerData>(
-              future: _nextPrayerFuture,
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const CircularProgressIndicator();
-                } else if (snapshot.hasError) {
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _prayerLoadErrorMessage(snapshot.error),
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            fontSize: 15,
-                            color: Colors.black87,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        FilledButton.icon(
-                          onPressed: _refreshNextPrayer,
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('Retry'),
-                        ),
-                      ],
+            Align(
+              alignment: Alignment.topRight,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 8, right: 12),
+                child: ElevatedButton.icon(
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const ThasbeehPage(),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.arrow_forward),
+                  label: const Text('Thasbeeh'),
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
                     ),
-                  );
-                } else {
-                  final nextPrayer = snapshot.data!;
-                  return Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (_usingPreviousLocation)
-                        const Padding(
-                          padding: EdgeInsets.only(bottom: 8),
-                          child: Text(
-                            'Showing prayer time from your previous location',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.black54,
-                            ),
-                          ),
-                        ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                        decoration: BoxDecoration(
-                          color: Colors.deepPurple.shade50,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Column(
-                          children: [
-                            const Text(
-                              "Next prayer is",
-                              style: TextStyle(fontSize: 14, color: Colors.black54),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              "${nextPrayer.name} at ${formatTime(nextPrayer.time)}",
-                              style: const TextStyle(
-                                fontSize: 22,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.deepPurple,
+                  ),
+                ),
+              ),
+            ),
+            Expanded(
+              child: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.start,
+                  children: [
+            const SizedBox(height: 25),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
+              child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.asset(
+                        'assets/icon/imam_logo.jpg',
+                        height: 165,
+                        width: 165,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Flexible(
+                      child: FutureBuilder<NextPrayerData>(
+                    future: _nextPrayerFuture,
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState == ConnectionState.waiting) {
+                        return const Align(
+                          alignment: Alignment.centerLeft,
+                          child: CircularProgressIndicator(),
+                        );
+                      } else if (snapshot.hasError) {
+                        return Padding(
+                          padding: const EdgeInsets.only(right: 12),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                _prayerLoadErrorMessage(snapshot.error),
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  color: Colors.black87,
+                                ),
                               ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              nextPrayer.remainingText,
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.green,
+                              const SizedBox(height: 8),
+                              FilledButton.icon(
+                                onPressed: _refreshNextPrayer,
+                                icon: const Icon(Icons.refresh),
+                                label: const Text('Retry'),
+                              ),
+                            ],
+                          ),
+                        );
+                      } else {
+                        final nextPrayer = snapshot.data!;
+                        return Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (_usingPreviousLocation)
+                              const Padding(
+                                padding: EdgeInsets.only(bottom: 8),
+                                child: Text(
+                                  'Showing prayer time from your previous location',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.black54,
+                                  ),
+                                ),
+                              ),
+                            Container(
+                              width: 300,
+                              height: 165,
+                              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                              decoration: BoxDecoration(
+                                color: Colors.deepPurple.shade50,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    "Next prayer is",
+                                    style: TextStyle(fontSize: 14, color: Colors.black54),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    "${nextPrayer.name} at ${formatTime(nextPrayer.time)}",
+                                    style: const TextStyle(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.deepPurple,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    nextPrayer.remainingText,
+                                    style: const TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.green,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ],
-                        ),
+                        );
+                      }
+                    },
                       ),
-                    ],
-                  );
-                }
-              },
+                    ),
+                  ],
+                ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 50),
             const Text(
-              'Direction of Namaz is showing below',
+              'Direction of Namaz',
               textAlign: TextAlign.center,
               style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
+                fontSize: 26,
+                fontWeight: FontWeight.bold,
               ),
             ),
             const SizedBox(height: 16),
@@ -525,21 +580,7 @@ class _MyHomePageState extends State<MyHomePage> {
                     ),
                   ),
 
-            const SizedBox(height: 40),
-            ElevatedButton.icon(
-              onPressed: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => const ThasbeehPage(),
-                  ),
-                );
-              },
-              icon: const Icon(Icons.arrow_forward),
-              label: const Text('Go to Thasbeeh'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(30),
+                  ],
                 ),
               ),
             ),

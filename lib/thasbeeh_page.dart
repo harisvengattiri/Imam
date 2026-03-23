@@ -32,6 +32,23 @@ class _ThasbeehPageState extends State<ThasbeehPage> {
       body: SafeArea(
         child: Column(
           children: [
+            Align(
+              alignment: Alignment.topRight,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 8, right: 12),
+                child: ElevatedButton.icon(
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(Icons.arrow_back),
+                  label: const Text('Back'),
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
+                  ),
+                ),
+              ),
+            ),
             const SizedBox(height: 12),
             ClipRRect(
               borderRadius: BorderRadius.circular(12),
@@ -42,7 +59,7 @@ class _ThasbeehPageState extends State<ThasbeehPage> {
                 fit: BoxFit.cover,
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 32),
             const Text(
               'Thasbeeh',
               style: TextStyle(
@@ -51,22 +68,22 @@ class _ThasbeehPageState extends State<ThasbeehPage> {
                 color: Colors.deepPurple,
               ),
             ),
-            const SizedBox(height: 23),
-            Text(
-              '$_counter',
-              style: const TextStyle(
-                fontSize: 48,
-                fontWeight: FontWeight.bold,
-                color: Colors.black87,
-              ),
-            ),
-            const SizedBox(height: 24),
             Expanded(
-              child: Center(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 12, bottom: 24),
                 child: Column(
-                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const SizedBox(height: 47),
+                    const Spacer(),
+                    Text(
+                      '$_counter',
+                      style: const TextStyle(
+                        fontSize: 48,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const Spacer(),
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [

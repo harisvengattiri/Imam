@@ -54,8 +54,8 @@ class _ThasbeehPageState extends State<ThasbeehPage> {
               borderRadius: BorderRadius.circular(12),
               child: Image.asset(
                 'assets/icon/imam_logo.jpg',
-                height: 200,
-                width: 200,
+                height: 150,
+                width: 150,
                 fit: BoxFit.cover,
               ),
             ),
@@ -70,7 +70,7 @@ class _ThasbeehPageState extends State<ThasbeehPage> {
             ),
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.only(top: 12, bottom: 24),
+                padding: const EdgeInsets.only(top: 12, bottom: 170),
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [

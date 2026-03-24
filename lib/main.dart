@@ -449,8 +449,8 @@ class _MyHomePageState extends State<MyHomePage> {
                       borderRadius: BorderRadius.circular(12),
                       child: Image.asset(
                         'assets/icon/imam_logo.jpg',
-                        height: 165,
-                        width: 165,
+                        height: 80,
+                        width: 80,
                         fit: BoxFit.cover,
                       ),
                     ),
@@ -505,8 +505,8 @@ class _MyHomePageState extends State<MyHomePage> {
                                 ),
                               ),
                             Container(
-                              width: 300,
-                              height: 165,
+                              width: 500,
+                              height: 120,
                               padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
                               decoration: BoxDecoration(
                                 color: Colors.deepPurple.shade50,

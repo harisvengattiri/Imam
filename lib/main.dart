@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter_compass/flutter_compass.dart';
 import 'package:intl/intl.dart';
@@ -13,7 +14,10 @@ import 'package:hello_app/thasbeeh_page.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Alarm.init();
+  // alarm uses mobile platform channels; on web it can trip the engine (window.dart assertions).
+  if (!kIsWeb) {
+    await Alarm.init();
+  }
   runApp(const MyApp());
 }
 
@@ -56,11 +60,14 @@ class NextPrayerData {
   final String name;
   final DateTime time;
   final String remainingText;
+  /// True when this column's prayer instant has passed (greyed UI).
+  final bool isPast;
 
   const NextPrayerData({
     required this.name,
     required this.time,
     required this.remainingText,
+    this.isPast = false,
   });
 }
 
@@ -77,22 +84,35 @@ class NextPrayerComparisonData {
 }
 
 class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
+  static const MethodChannel _androidGpsChannel =
+      MethodChannel('com.example.hello_app/location');
+
   static const String _adhanAssetPath = 'assets/audio/adhan.mp3';
 
   static const String _lastLatKey = 'last_known_prayer_lat';
   static const String _lastLngKey = 'last_known_prayer_lng';
   static const String _backgroundAdhanEnabledKey = 'background_adhan_enabled';
 
+  /// Reference coordinates when user has not saved a device location (same as Qibla default).
+  static const double _defaultPrayerLat = 21.4225;
+  static const double _defaultPrayerLng = 39.8262;
+
   double? phoneHeading;
   double? targetBearing;
   late Future<NextPrayerComparisonData> _nextPrayerFuture;
   bool _usingPreviousLocation = false;
-  bool _isLocationAvailable = false;
+  bool _usingDefaultReferenceLocation = false;
+  /// Set when the user last tapped the location button while device location was off.
+  bool _gpsWasOffOnLastLocationTap = false;
+  /// True if that tap used SharedPreferences (saved) coordinates as cache.
+  bool _usedSavedCacheOnLastLocationTap = false;
+  /// Satellite GPS provider on (FAB green); independent of app permission.
+  bool _gpsSatelliteOn = false;
   bool _backgroundAdhanEnabled = true;
   StreamSubscription<ServiceStatus>? _locationServiceSubscription;
   StreamSubscription<dynamic>? _alarmRingingSubscription;
+  Timer? _gpsStatusPollTimer;
   bool _isAdhanDialogVisible = false;
-  bool? _previousLocationServiceEnabled;
 
   double currentLat = 0;
   double currentLng = 0;
@@ -100,16 +120,65 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   double targetLat = 21.4225;
   double targetLng = 39.8262;
 
-  Future<void> _updateLocationAvailability() async {
-    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    final permission = await Geolocator.checkPermission();
-    final permissionGranted = permission == LocationPermission.whileInUse ||
-        permission == LocationPermission.always;
+  /// True only when system Location is on **and** (on Android) the GPS
+  /// provider is enabled — not Wi‑Fi/scan‑only. If Location is off entirely,
+  /// [Geolocator.isLocationServiceEnabled] is false so the FAB is not green.
+  Future<bool> _isGpsSatelliteEnabled() async {
+    if (kIsWeb) {
+      return Geolocator.isLocationServiceEnabled();
+    }
+    final locationMasterOn = await Geolocator.isLocationServiceEnabled();
+    if (!locationMasterOn) return false;
 
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      try {
+        final gpsEnabled = await _androidGpsChannel
+            .invokeMethod<bool>('isGpsProviderEnabled');
+        return gpsEnabled ?? false;
+      } catch (_) {
+        return locationMasterOn;
+      }
+    }
+    return true;
+  }
+
+  /// Live GPS read is allowed: satellite GPS on and (already granted or newly granted) permission.
+  Future<bool> _canUseLiveGpsNow() async {
+    final gpsOn = await _isGpsSatelliteEnabled();
+    if (!gpsOn) return false;
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    return permission == LocationPermission.whileInUse ||
+        permission == LocationPermission.always;
+  }
+
+  Future<void> _updateLocationAvailability() async {
+    final gpsOn = await _isGpsSatelliteEnabled();
     if (!mounted) return;
+    final wasOn = _gpsSatelliteOn;
+    if (wasOn == gpsOn) return;
     setState(() {
-      _isLocationAvailable = serviceEnabled && permissionGranted;
+      _gpsSatelliteOn = gpsOn;
+      if (wasOn && !gpsOn) {
+        _nextPrayerFuture = getNextPrayerTime(fetchFreshGps: false);
+      }
     });
+  }
+
+  Widget _playAdhanSwitchRow() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Text('Play Adhan'),
+        const SizedBox(width: 8),
+        Switch.adaptive(
+          value: _backgroundAdhanEnabled,
+          onChanged: _setBackgroundAdhanEnabled,
+        ),
+      ],
+    );
   }
 
   void _applyCoordinates(double lat, double lng) {
@@ -135,7 +204,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   Future<void> _loadBackgroundAdhanPreference() async {
     final prefs = await SharedPreferences.getInstance();
     final enabled = prefs.getBool(_backgroundAdhanEnabledKey) ?? true;
-    if (!enabled) {
+    if (!enabled && !kIsWeb) {
       await Alarm.stopAll();
     }
     if (!mounted) return;
@@ -152,10 +221,15 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       _backgroundAdhanEnabled = enabled;
     });
     if (!enabled) {
-      await Alarm.stopAll();
+      if (!kIsWeb) await Alarm.stopAll();
     } else {
       await _ensureAndroidPrayerPermissions();
-      _refreshNextPrayer();
+      if (!mounted) return;
+      final fresh = await _canUseLiveGpsNow();
+      if (!mounted) return;
+      setState(() {
+        _nextPrayerFuture = getNextPrayerTime(fetchFreshGps: fresh);
+      });
     }
   }
 
@@ -170,8 +244,27 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   Future<({double lat, double lng, bool usedPrevious})> getLocation({
+    required bool useDeviceGps,
     bool preferFreshLocation = false,
   }) async {
+    if (!useDeviceGps) {
+      final saved = await _loadLastLocation();
+      if (saved != null) {
+        _applyCoordinates(saved.lat, saved.lng);
+        return (
+          lat: saved.lat,
+          lng: saved.lng,
+          usedPrevious: true,
+        );
+      }
+      _applyCoordinates(_defaultPrayerLat, _defaultPrayerLng);
+      return (
+        lat: _defaultPrayerLat,
+        lng: _defaultPrayerLng,
+        usedPrevious: false,
+      );
+    }
+
     Future<({double lat, double lng, bool usedPrevious})?> tryPlatformLastKnown() async {
       try {
         final last = await Geolocator.getLastKnownPosition();
@@ -193,7 +286,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       return null;
     }
 
-    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    final serviceEnabled = await _isGpsSatelliteEnabled();
     if (!serviceEnabled) {
       await _updateLocationAvailability();
       if (preferFreshLocation) {
@@ -268,8 +361,6 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     } catch (_) {}
 
     if (preferFreshLocation) {
-      final lastAfterFail = await tryPlatformLastKnown();
-      if (lastAfterFail != null) return lastAfterFail;
       throw Exception(
         'Could not get your current location yet. Please wait a moment and tap refresh again.',
       );
@@ -286,9 +377,64 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     );
   }
 
-  void _refreshNextPrayer() {
+  /// Location button: confirm when GPS is on; when GPS is off use saved cache (no error UI).
+  Future<void> _onLocationFabPressed() async {
+    await _updateLocationAvailability();
+    final gpsOn = await _isGpsSatelliteEnabled();
+
+    if (!gpsOn) {
+      final saved = await _loadLastLocation();
+      if (!mounted) return;
+      setState(() {
+        _gpsWasOffOnLastLocationTap = true;
+        _usedSavedCacheOnLastLocationTap = saved != null;
+        if (saved != null) {
+          _nextPrayerFuture = getNextPrayerTimeFromCoordinates(
+            saved.lat,
+            saved.lng,
+            usedPrevious: true,
+            isDefaultReference: false,
+          );
+        } else {
+          _nextPrayerFuture = getNextPrayerTimeFromCoordinates(
+            _defaultPrayerLat,
+            _defaultPrayerLng,
+            usedPrevious: false,
+            isDefaultReference: true,
+          );
+        }
+      });
+      return;
+    }
+
+    if (!mounted) return;
+    final proceed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(kIsWeb ? 'Use your location' : 'GPS is on'),
+        content: Text(
+          kIsWeb
+              ? 'Your browser will ask to share your location so prayer times can update.'
+              : 'Satellite GPS is turned on. This app will read your current '
+                  'position to update prayer times.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+    if (proceed != true || !mounted) return;
     setState(() {
-      _nextPrayerFuture = getNextPrayerTime(preferFreshLocation: true);
+      _gpsWasOffOnLastLocationTap = false;
+      _usedSavedCacheOnLastLocationTap = false;
+      _nextPrayerFuture = getNextPrayerTime(fetchFreshGps: true);
     });
   }
 
@@ -336,49 +482,140 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     return p;
   }
 
-  NextPrayerData getNextPrayerFromAdhanParams(
+  String _capitalizePrayerName(String name) {
+    if (name.isEmpty) return name;
+    return name[0].toUpperCase() + name.substring(1).toLowerCase();
+  }
+
+  /// One prayer name on both cards; each column muted when its own time has passed.
+  /// Advances to the next prayer only after **both** Masjid and standard times have passed.
+  NextPrayerComparisonData buildSynchronizedNextPrayerComparison(
     double lat,
     double lon,
-    adhan.CalculationParameters params,
   ) {
     final now = DateTime.now();
-    final prayerTimes = adhan.PrayerTimes(
-      adhan.Coordinates(lat, lon),
+    final coords = adhan.Coordinates(lat, lon);
+    final adjParams = _areaAdjustedAdhanParams();
+    final stdParams = _standardAdhanParams();
+
+    final adjPt = adhan.PrayerTimes(
+      coords,
       adhan.DateComponents.from(now),
-      params,
+      adjParams,
+    );
+    final stdPt = adhan.PrayerTimes(
+      coords,
+      adhan.DateComponents.from(now),
+      stdParams,
     );
 
-    final schedule = <(String, DateTime)>[
-      ('fajr', prayerTimes.fajr),
-      ('dhuhr', prayerTimes.dhuhr),
-      ('asr', prayerTimes.asr),
-      ('maghrib', prayerTimes.maghrib),
-      ('isha', prayerTimes.isha),
+    final slots = <(String name, DateTime adj, DateTime std)>[
+      ('fajr', adjPt.fajr, stdPt.fajr),
+      ('dhuhr', adjPt.dhuhr, stdPt.dhuhr),
+      ('asr', adjPt.asr, stdPt.asr),
+      ('maghrib', adjPt.maghrib, stdPt.maghrib),
+      ('isha', adjPt.isha, stdPt.isha),
     ];
 
-    for (final item in schedule) {
-      if (!now.isAfter(item.$2)) {
-        final remaining = item.$2.difference(now);
-        return NextPrayerData(
-          name: item.$1,
-          time: item.$2,
-          remainingText: formatRemainingDuration(remaining),
+    for (final s in slots) {
+      final adjPassed = now.isAfter(s.$2);
+      final stdPassed = now.isAfter(s.$3);
+      if (!adjPassed || !stdPassed) {
+        return NextPrayerComparisonData(
+          adjusted: NextPrayerData(
+            name: s.$1,
+            time: s.$2,
+            remainingText: adjPassed
+                ? 'Masjid time passed'
+                : formatRemainingDuration(s.$2.difference(now)),
+            isPast: adjPassed,
+          ),
+          standard: NextPrayerData(
+            name: s.$1,
+            time: s.$3,
+            remainingText: stdPassed
+                ? 'Standard time passed'
+                : formatRemainingDuration(s.$3.difference(now)),
+            isPast: stdPassed,
+          ),
         );
       }
     }
 
     final tomorrow = now.add(const Duration(days: 1));
-    final tomorrowPrayerTimes = adhan.PrayerTimes(
-      adhan.Coordinates(lat, lon),
+    final adjTom = adhan.PrayerTimes(
+      coords,
       adhan.DateComponents.from(tomorrow),
-      params,
+      adjParams,
     );
+    final stdTom = adhan.PrayerTimes(
+      coords,
+      adhan.DateComponents.from(tomorrow),
+      stdParams,
+    );
+    final af = adjTom.fajr;
+    final sf = stdTom.fajr;
+    return NextPrayerComparisonData(
+      adjusted: NextPrayerData(
+        name: 'fajr',
+        time: af,
+        remainingText: formatRemainingDuration(af.difference(now)),
+      ),
+      standard: NextPrayerData(
+        name: 'fajr',
+        time: sf,
+        remainingText: formatRemainingDuration(sf.difference(now)),
+      ),
+    );
+  }
 
-    final remaining = tomorrowPrayerTimes.fajr.difference(now);
-    return NextPrayerData(
-      name: 'fajr',
-      time: tomorrowPrayerTimes.fajr,
-      remainingText: formatRemainingDuration(remaining),
+  Widget _nextPrayerCard(
+    BuildContext context, {
+    required String header,
+    required NextPrayerData data,
+  }) {
+    final past = data.isPast;
+    return Container(
+      width: MediaQuery.of(context).size.width * 0.7,
+      height: 120,
+      padding: const EdgeInsets.symmetric(
+        horizontal: 18,
+        vertical: 16,
+      ),
+      decoration: BoxDecoration(
+        color: past ? Colors.grey.shade200 : Colors.deepPurple.shade50,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            header,
+            style: TextStyle(
+              fontSize: 14,
+              color: past ? Colors.black38 : Colors.black54,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '${_capitalizePrayerName(data.name)} at ${formatTime(data.time)}',
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              color: past ? Colors.black45 : Colors.deepPurple,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            data.remainingText,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              color: past ? Colors.black45 : Colors.green,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -392,9 +629,6 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         Future<void>.delayed(const Duration(milliseconds: 450));
 
     try {
-      await Permission.locationWhenInUse.request();
-      await gap();
-
       await Permission.notification.request();
       await gap();
 
@@ -420,7 +654,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _syncBackgroundAdhanAlarms(double lat, double lon) async {
-    if (!_backgroundAdhanEnabled) return;
+    if (kIsWeb || !_backgroundAdhanEnabled) return;
 
     await _ensureAndroidPrayerPermissions();
 
@@ -480,6 +714,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   void _setupAlarmRingingListener() {
+    if (kIsWeb) return;
     _alarmRingingSubscription = Alarm.ringing.listen((alarmSet) async {
       if (!mounted || _isAdhanDialogVisible) return;
       if (alarmSet.alarms.isEmpty) return;
@@ -534,37 +769,153 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     return '$hours hour${hours == 1 ? '' : 's'} and $minutes minute${minutes == 1 ? '' : 's'} more';
   }
 
+  void _showAllPrayersDialog(BuildContext context) {
+    final now = DateTime.now();
+    final coords = adhan.Coordinates(currentLat, currentLng);
+    final adjustedPt = adhan.PrayerTimes(
+      coords,
+      adhan.DateComponents.from(now),
+      _areaAdjustedAdhanParams(),
+    );
+    final standardPt = adhan.PrayerTimes(
+      coords,
+      adhan.DateComponents.from(now),
+      _standardAdhanParams(),
+    );
+    final adjustedRows = _prayerScheduleFromAdhan(adjustedPt);
+    final standardRows = _prayerScheduleFromAdhan(standardPt);
+
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Today\'s prayers'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                DateFormat.yMMMEd().format(now),
+                style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                      color: Colors.black54,
+                    ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Masjid time',
+                style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: Colors.deepPurple,
+                    ),
+              ),
+              const SizedBox(height: 6),
+              ...adjustedRows.map(
+                (e) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(e.$1),
+                      Text(
+                        formatTime(e.$2),
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const Divider(height: 24),
+              Text(
+                'Standard Adhan',
+                style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: Colors.deepPurple,
+                    ),
+              ),
+              const SizedBox(height: 6),
+              ...standardRows.map(
+                (e) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(e.$1),
+                      Text(
+                        formatTime(e.$2),
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<NextPrayerComparisonData> _bootstrapFirstLoad() async {
     await _ensureAndroidPrayerPermissions();
-    return getNextPrayerTime();
+    final fresh = await _canUseLiveGpsNow();
+    return getNextPrayerTime(fetchFreshGps: fresh);
+  }
+
+  Future<NextPrayerComparisonData> getNextPrayerTimeFromCoordinates(
+    double lat,
+    double lng, {
+    required bool usedPrevious,
+    required bool isDefaultReference,
+  }) async {
+    _applyCoordinates(lat, lng);
+    if (mounted) {
+      setState(() {
+        _usingPreviousLocation = usedPrevious;
+        _usingDefaultReferenceLocation = isDefaultReference;
+      });
+    }
+    return _buildPrayerComparisonAndSyncAlarms(lat, lng);
   }
 
   Future<NextPrayerComparisonData> getNextPrayerTime({
-    bool preferFreshLocation = false,
+    bool fetchFreshGps = false,
   }) async {
-    final location = await getLocation(preferFreshLocation: preferFreshLocation);
+    final location = await getLocation(
+      useDeviceGps: fetchFreshGps,
+      preferFreshLocation: fetchFreshGps,
+    );
     if (mounted) {
+      final isDefaultRef = !fetchFreshGps &&
+          !location.usedPrevious &&
+          (location.lat - _defaultPrayerLat).abs() < 0.0002 &&
+          (location.lng - _defaultPrayerLng).abs() < 0.0002;
       setState(() {
         _usingPreviousLocation = location.usedPrevious;
+        _usingDefaultReferenceLocation = isDefaultRef;
+        if (fetchFreshGps) {
+          _gpsWasOffOnLastLocationTap = false;
+          _usedSavedCacheOnLastLocationTap = false;
+        }
       });
     }
 
-    final data = NextPrayerComparisonData(
-      adjusted: getNextPrayerFromAdhanParams(
-        location.lat,
-        location.lng,
-        _areaAdjustedAdhanParams(),
-      ),
-      standard: getNextPrayerFromAdhanParams(
-        location.lat,
-        location.lng,
-        _standardAdhanParams(),
-      ),
-    );
+    return _buildPrayerComparisonAndSyncAlarms(location.lat, location.lng);
+  }
 
-    // Do not block UI on alarm permission prompts or many Alarm.set calls.
+  Future<NextPrayerComparisonData> _buildPrayerComparisonAndSyncAlarms(
+    double lat,
+    double lon,
+  ) async {
+    final data = buildSynchronizedNextPrayerComparison(lat, lon);
+
     unawaited(
-      _syncBackgroundAdhanAlarms(location.lat, location.lng).catchError((_) {}),
+      _syncBackgroundAdhanAlarms(lat, lon).catchError((_) {}),
     );
 
     return data;
@@ -573,6 +924,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
+    unawaited(_updateLocationAvailability());
     if (!_backgroundAdhanEnabled) return;
     unawaited(_resyncAlarmsAfterResume().catchError((_) {}));
   }
@@ -593,23 +945,23 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     _loadBackgroundAdhanPreference();
     _setupAlarmRingingListener();
     _nextPrayerFuture = _bootstrapFirstLoad();
-    _updateLocationAvailability();
+    unawaited(_updateLocationAvailability());
     if (!kIsWeb) {
-      Geolocator.isLocationServiceEnabled().then((enabled) {
-        _previousLocationServiceEnabled = enabled;
-      });
       _locationServiceSubscription =
-          Geolocator.getServiceStatusStream().listen((status) async {
+          Geolocator.getServiceStatusStream().listen((_) async {
         await _updateLocationAvailability();
-        final enabled = status == ServiceStatus.enabled;
-        if (_previousLocationServiceEnabled == false &&
-            enabled &&
-            mounted) {
-          _refreshNextPrayer();
-        }
-        _previousLocationServiceEnabled = enabled;
       });
     }
+    // Quick Settings / satellite toggle often do not emit [getServiceStatusStream].
+    _gpsStatusPollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted) return;
+      final life = WidgetsBinding.instance.lifecycleState;
+      if (life == AppLifecycleState.paused ||
+          life == AppLifecycleState.detached) {
+        return;
+      }
+      unawaited(_updateLocationAvailability());
+    });
 
     FlutterCompass.events?.listen((event) {
       setState(() {
@@ -621,6 +973,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _gpsStatusPollTimer?.cancel();
     _locationServiceSubscription?.cancel();
     _alarmRingingSubscription?.cancel();
     super.dispose();
@@ -704,9 +1057,10 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
       floatingActionButton: FloatingActionButton(
-        onPressed: _refreshNextPrayer,
-        backgroundColor: _isLocationAvailable ? Colors.green : Colors.red,
-        tooltip: 'Refresh location',
+        onPressed: () => unawaited(_onLocationFabPressed()),
+        backgroundColor: _gpsSatelliteOn ? Colors.green : Colors.red,
+        foregroundColor: Colors.white,
+        tooltip: 'Update location for prayer times',
         child: const Icon(Icons.my_location),
       ),
       body: SafeArea(
@@ -749,21 +1103,6 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                   ),
             const SizedBox(height: 50),
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 25),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  const Text('Play Adhan'),
-                  const SizedBox(width: 10), // space between text and switch
-                  Switch.adaptive(
-                    value: _backgroundAdhanEnabled,
-                    onChanged: _setBackgroundAdhanEnabled,
-                  ),
-                ],
-              ),
-            ),
-            Padding(
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 25),
               child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -774,40 +1113,100 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                     future: _nextPrayerFuture,
                     builder: (context, snapshot) {
                       if (snapshot.connectionState == ConnectionState.waiting) {
-                        return const Align(
-                          alignment: Alignment.centerLeft,
-                          child: CircularProgressIndicator(),
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Align(
+                              alignment: Alignment.centerLeft,
+                              child: CircularProgressIndicator(),
+                            ),
+                            const SizedBox(height: 16),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [_playAdhanSwitchRow()],
+                            ),
+                          ],
                         );
                       } else if (snapshot.hasError) {
-                        return Padding(
-                          padding: const EdgeInsets.only(right: 12),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.only(right: 12),
+                              child: Text(
                                 _prayerLoadErrorMessage(snapshot.error),
                                 style: const TextStyle(
                                   fontSize: 14,
                                   color: Colors.black87,
                                 ),
                               ),
-                              const SizedBox(height: 8),
-                              FilledButton.icon(
-                                onPressed: _refreshNextPrayer,
-                                icon: const Icon(Icons.refresh),
-                                label: const Text('Retry'),
-                              ),
-                            ],
-                          ),
+                            ),
+                            const SizedBox(height: 8),
+                            FilledButton.icon(
+                              onPressed: () {
+                                setState(() {
+                                  _nextPrayerFuture =
+                                      getNextPrayerTime(fetchFreshGps: true);
+                                });
+                              },
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('Retry'),
+                            ),
+                            const SizedBox(height: 16),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [_playAdhanSwitchRow()],
+                            ),
+                          ],
                         );
                       } else {
                         final nextPrayer = snapshot.data!;
                         return Column(
                           mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            if (_usingPreviousLocation)
+                            if (_gpsWasOffOnLastLocationTap) ...[
+                              const Padding(
+                                padding: EdgeInsets.only(bottom: 4),
+                                child: Text(
+                                  'GPS is off.',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 8),
+                                child: Text(
+                                  _usedSavedCacheOnLastLocationTap
+                                      ? 'Prayer times are from your saved location (cache).'
+                                      : 'No saved position yet — prayer times use the reference location (Makkah).',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.black54,
+                                  ),
+                                ),
+                              ),
+                            ],
+                            if (!_gpsWasOffOnLastLocationTap &&
+                                _usingDefaultReferenceLocation)
+                              const Padding(
+                                padding: EdgeInsets.only(bottom: 8),
+                                child: Text(
+                                  'Prayer times use a reference location (Makkah) until you save a position via the location button.',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.black54,
+                                  ),
+                                ),
+                              ),
+                            if (!_gpsWasOffOnLastLocationTap &&
+                                _usingPreviousLocation &&
+                                !_usingDefaultReferenceLocation)
                               const Padding(
                                 padding: EdgeInsets.only(bottom: 8),
                                 child: Text(
@@ -820,90 +1219,30 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                               ),
                             Column(
                               children: [
-                                Container(
-                                  width: MediaQuery.of(context).size.width * 0.7,
-                                  height: 120,
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 18,
-                                    vertical: 16,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: Colors.deepPurple.shade50,
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      const Text(
-                                        "Next prayer (Masjid Time)",
-                                        style: TextStyle(
-                                          fontSize: 14,
-                                          color: Colors.black54,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        "${nextPrayer.adjusted.name} at ${formatTime(nextPrayer.adjusted.time)}",
-                                        style: const TextStyle(
-                                          fontSize: 22,
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.deepPurple,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        nextPrayer.adjusted.remainingText,
-                                        style: const TextStyle(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w600,
-                                          color: Colors.green,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
+                                _nextPrayerCard(
+                                  context,
+                                  header: 'Next prayer (Masjid Time)',
+                                  data: nextPrayer.adjusted,
                                 ),
                                 const SizedBox(height: 8),
-                                Container(
-                                  width: MediaQuery.of(context).size.width * 0.7,
-                                  height: 120,
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 18,
-                                    vertical: 16,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: Colors.deepPurple.shade50,
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      const Text(
-                                        "Next prayer (standard Adhan)",
-                                        style: TextStyle(
-                                          fontSize: 14,
-                                          color: Colors.black54,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        "${nextPrayer.standard.name} at ${formatTime(nextPrayer.standard.time)}",
-                                        style: const TextStyle(
-                                          fontSize: 22,
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.deepPurple,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        nextPrayer.standard.remainingText,
-                                        style: const TextStyle(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w600,
-                                          color: Colors.green,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
+                                _nextPrayerCard(
+                                  context,
+                                  header: 'Next prayer (standard Adhan)',
+                                  data: nextPrayer.standard,
+                                ),
+                                const SizedBox(height: 16),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.center,
+                                  children: [
+                                    FilledButton.tonal(
+                                      onPressed: () =>
+                                          _showAllPrayersDialog(context),
+                                      child: const Text('Show all prayers'),
+                                    ),
+                                    const SizedBox(width: 16),
+                                    _playAdhanSwitchRow(),
+                                  ],
                                 ),
                               ],
                             ),

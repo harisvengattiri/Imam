@@ -1031,26 +1031,25 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         ),
         actions: [
           Padding(
-            padding: const EdgeInsets.only(right: 20),
-            child: SizedBox(
-              height: 28,
-              child: ElevatedButton.icon(
-                onPressed: () {
+            padding: const EdgeInsets.only(right: 6),
+            child: PopupMenuButton<String>(
+              icon: const Icon(Icons.menu),
+              position: PopupMenuPosition.under,
+              onSelected: (value) {
+                if (value == 'thasbeeh') {
                   Navigator.of(context).push(
                     MaterialPageRoute(
                       builder: (_) => const ThasbeehPage(),
                     ),
                   );
-                },
-                icon: const Icon(Icons.arrow_forward),
-                label: const Text('Thasbeeh'),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 0),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(30),
-                  ),
+                }
+              },
+              itemBuilder: (context) => const [
+                PopupMenuItem<String>(
+                  value: 'thasbeeh',
+                  child: Text('Thasbeeh'),
                 ),
-              ),
+              ],
             ),
           ),
         ],
